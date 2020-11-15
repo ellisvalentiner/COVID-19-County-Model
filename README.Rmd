@@ -17,6 +17,7 @@ library(rstan)
 library(tidybayes)
 library(sf)
 library(leaflet)
+
 rstan_options(auto_write = TRUE)
 options(mc.cores = parallel::detectCores())
 ```
@@ -72,13 +73,12 @@ parameters {
 model {
   kappa ~ pareto(1, 1.5);  // hyperprior
   theta ~ beta(phi * kappa, (1 - phi) * kappa); // prior
-  // theta ~ beta(0.5, 0.5);
   y ~ binomial(K, theta); // likelihood
 }
 "
 ```
 
-```{r fit}
+```{r fit, cache=TRUE, cache.vars=Sys.Date()}
 fit <-
   stan(
     model_code = model_code,
