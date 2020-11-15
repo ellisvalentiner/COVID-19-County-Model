@@ -1,0 +1,124 @@
+---
+output: github_document
+editor_options: 
+  chunk_output_type: console
+---
+
+<!-- README.md is generated from README.Rmd. Please edit that file -->
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  collapse = TRUE,
+  comment ="#>"
+)
+library(tidyverse)
+library(rstan)
+library(tidybayes)
+library(sf)
+library(leaflet)
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+```
+
+# COVID-19 County Model
+
+```{r get-data, cache=TRUE, cache.vars=Sys.Date()}
+covid_cases <-
+  read_csv(
+    file = "https://raw.githubusercontent.com/appliedbinf/covid19-event-risk-planner/master/usa_risk_counties.csv",
+    col_types = cols(
+      GEOID = col_integer(),
+      NAME = col_character(),
+      stname = col_character(),
+      cases = col_double(),
+      deaths = col_double(),
+      cases_past = col_double(),
+      X = col_double(),
+      pop = col_double(),
+      Nr = col_double(),
+      risk = col_double(),
+      asc_bias = col_double(),
+      event_size = col_double()
+    )
+  ) %>%
+  arrange(GEOID) %>%
+  remove_missing(na.rm = TRUE, vars = c("GEOID", "cases", "pop")) %>%
+  select(GEOID, NAME, stname, cases, pop) %>%
+  distinct()
+
+counties <-
+  sf::read_sf(
+    dsn = "https://raw.githubusercontent.com/appliedbinf/covid19-event-risk-planner/master/COVID19-Event-Risk-Planner/map_data/tl_2017_us_county.geojson"
+  )
+
+data <- 
+  covid_cases %>%
+  left_join(counties)
+```
+
+```{r model}
+model_code = "
+data {
+  int<lower=0> N;     // counties
+  int<lower=0> y[N];  // cases
+  int<lower=0> K[N];  // populations
+}
+parameters {
+  real<lower=0, upper=1> phi;  // population (national) chance of covid
+  real<lower=1> kappa;         // population (nation) concenration
+  vector<lower=0, upper=1>[N] theta;  // chance of covid 
+}
+model {
+  kappa ~ pareto(1, 1.5);  // hyperprior
+  theta ~ beta(phi * kappa, (1 - phi) * kappa); // prior
+  // theta ~ beta(0.5, 0.5);
+  y ~ binomial(K, theta); // likelihood
+}
+"
+```
+
+```{r fit}
+fit <-
+  stan(
+    model_code = model_code,
+    data=list(
+      "N"=nrow(data),
+      "K"=data$pop,
+      "y"=data$cases
+    ),
+    iter=5000,
+    chains=4
+  )
+```
+
+```{r post-processing}
+predictions <- 
+  fit %>%
+  recover_types() %>%
+  gather_draws(theta[i])  %>%
+  group_by(i) %>%
+  summarize(
+    posterior_median = median(.value),
+  )
+
+map_data <- 
+  data %>%
+  bind_cols(predictions) %>%
+  st_sf()
+```
+
+```{r map}
+leaflet() %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  setView(lat = 37.1, lng = -95.7, zoom = 4) %>%
+  addPolygons(
+    data = map_data,
+    color = "#444444", weight = 0.2, smoothFactor = 0.1,
+    opacity = 1.0, fillOpacity = 0.7,
+    fillColor = ~ colorBin("viridis", bins = quantile(map_data$posterior_median, probs = seq(0, 1, 1/5), na.rm = TRUE))(posterior_median),
+    highlight = highlightOptions(weight = 1),
+    label = glue::glue("{map_data$NAME}, {map_data$stname}\n{scales::percent(map_data$posterior_median, accuracy = 0.1)}")
+  )
+```
+
